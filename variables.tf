@@ -35,7 +35,7 @@ variable "location" {
 variable "project_service_account_id" {
   type        = string
   description = "The account id of the main service account associated to the project"
-  default     = "iaac"
+  default     = "firebase-iaac"
   nullable    = false
 }
 
