@@ -19,6 +19,11 @@ data "google_client_openid_userinfo" "gcloud-user" {
   provider = google-beta.gcloud-user
 }
 
+resource "random_id" "project" {
+  byte_length = 4
+}
+
+
 # ====================================================== #
 #   Section 1: Project and relative service account
 #              for IAM
@@ -26,9 +31,10 @@ data "google_client_openid_userinfo" "gcloud-user" {
 
 resource "google_project" "default" {
   provider        = google-beta.gcloud-user
-  project_id      = var.project_id
+  project_id      = var.randomize_project_id ? "${substr(var.project_id, 0, 21)}-${random_id.project.hex}" : var.project_id
   name            = var.project_name
   billing_account = data.google_billing_account.account.id
+  org_id          = var.org_id
 }
 
 resource "google_service_account" "service_account" {
@@ -85,7 +91,7 @@ resource "time_sleep" "delay_token_creation" {
     google_project_iam_member.service-account-iams
   ]
 
-  create_duration = "30s"
+  create_duration = "60s"
 }
 
 data "google_service_account_access_token" "default" {
@@ -208,41 +214,13 @@ resource "google_project_service" "cloud_build" {
 # ====================================================== #
 #   Section 4: Creating the Firebase project
 # ====================================================== #
-
-# resource "google_firebase_project" "default" {
-#   provider = google-beta.service-account
-#   project  = google_project.default.project_id
-#   depends_on = [
-#     google_project_service.firebase
-#   ]
-# }
-
-# resource "google_firebase_web_app" "app" {
-#   provider     = google-beta.service-account
-#   project      = google_project.default.project_id
-#   display_name = var.project_name
-#   depends_on = [
-#     google_firebase_project.default
-#   ]
-# }
-
-# data "google_firebase_web_app_config" "app" {
-#   provider   = google-beta.service-account
-#   web_app_id = google_firebase_web_app.app.app_id
-# }
-
-# # Create firestore database
-# resource "google_app_engine_application" "app" {
-#   provider = google-beta.service-account
-#   #   provider      = google-beta.gcloud-user
-#   project       = google_project.default.project_id
-#   location_id   = var.location
-#   database_type = "CLOUD_FIRESTORE"
-#   depends_on = [
-#     google_project_iam_member.service-account-iams["appengine-admin-iam"],
-#     google_project_iam_member.service-account-iams["appengine-creator-iam"],
-#     google_project_service.firestore
-#   ]
+# module "firebase" {
+#   source       = "./modules/firebase"
+#   project_name = var.project_name
+#   location     = var.location
+#   providers = {
+#     google-beta = google-beta
+#   }
 # }
 
 # # Create a bucket for backups

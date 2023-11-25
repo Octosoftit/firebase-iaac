@@ -3,10 +3,21 @@ variable "billing_account_id" {
   description = "The id of the associated billing account"
   nullable    = false
 }
+variable "org_id" {
+  type        = string
+  description = "The organization under which the project is created"
+  nullable    = false
+}
 variable "project_id" {
   type        = string
-  description = "The id of the created project"
+  description = "The id of the created project."
   nullable    = false
+}
+variable "randomize_project_id" {
+  type        = string
+  description = "Set to true in order to attach a random string at the end of the project id, useful when testing."
+  nullable    = false
+  default     = false
 }
 variable "project_name" {
   type        = string
