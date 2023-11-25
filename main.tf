@@ -214,14 +214,21 @@ resource "google_project_service" "cloud_build" {
 # ====================================================== #
 #   Section 4: Creating the Firebase project
 # ====================================================== #
-# module "firebase" {
-#   source       = "./modules/firebase"
-#   project_name = var.project_name
-#   location     = var.location
-#   providers = {
-#     google-beta = google-beta
-#   }
-# }
+module "firebase" {
+  source       = "./modules/firebase"
+  project_name = var.project_name
+  location     = var.location
+  project_id   = google_project.default.project_id
+  providers = {
+    google-beta.service-account = google-beta.service-account
+  }
+
+  depends_on = [
+    google_project_iam_member.service-account-iams,
+    google_project_service.firebase,
+    google_project_service.firestore
+  ]
+}
 
 # # Create a bucket for backups
 # resource "google_storage_bucket" "backup" {
