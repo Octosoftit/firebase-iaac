@@ -37,3 +37,4 @@ terraform.rc
 admin-config.json
 firebase-config.json
 secrets.json
+.terraform.lock.hcl
