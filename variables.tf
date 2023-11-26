@@ -56,3 +56,10 @@ variable "project_service_account_name" {
   default     = "Iaac Automation"
   nullable    = false
 }
+
+variable "enable_authentication_service" {
+  type        = bool
+  default     = false
+  description = "If true enables the Identity Platform configuration for a the cloud project (Available only when quota is enabled on the project, like for prod)."
+  nullable    = false
+}

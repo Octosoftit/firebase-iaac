@@ -1,7 +1,3 @@
-locals {
-  bucket_location = "EUROPE-WEST1"
-}
-
 # Basic provider - given the variables we need to configure it here
 provider "google-beta" {
   alias  = "gcloud-user"
@@ -23,6 +19,9 @@ resource "random_id" "project" {
   byte_length = 4
 }
 
+locals {
+  enable_authentication_service = var.enable_authentication_service
+}
 
 # ====================================================== #
 #   Section 1: Project and relative service account
@@ -74,13 +73,11 @@ resource "google_project_iam_member" "service-account-iams" {
   member   = "serviceAccount:${google_service_account.service_account.email}"
 }
 
-resource "google_service_account_key" "mykey" {
+resource "google_service_account_key" "sa_key" {
   provider           = google-beta.gcloud-user
   service_account_id = google_service_account.service_account.id
   depends_on = [
     google_project_iam_member.service-account-iams
-    # google_project_iam_member.firebase-admin-iam,
-    # google_project_iam_member.service-usage-admin-iam,
   ]
 }
 
@@ -215,164 +212,114 @@ resource "google_project_service" "cloud_build" {
 #   Section 4: Creating the Firebase project
 # ====================================================== #
 module "firebase" {
-  source       = "./modules/firebase"
-  project_name = var.project_name
-  location     = var.location
-  project_id   = google_project.default.project_id
+  source              = "./modules/firebase"
+  project_name        = var.project_name
+  location            = var.location
+  project_id          = google_project.default.project_id
+  resource_suffix     = var.randomize_project_id ? random_id.project.hex : ""
+  gcp_sa_access_token = data.google_service_account_access_token.default.access_token
+
   providers = {
     google-beta.service-account = google-beta.service-account
+    google-beta.gcloud-user     = google-beta.gcloud-user
   }
 
   depends_on = [
     google_project_iam_member.service-account-iams,
     google_project_service.firebase,
-    google_project_service.firestore
+    google_project_service.firestore,
+    google_project_service.firebasestorage,
+    google_project_service.identitytoolkit
   ]
 }
 
-# # Create a bucket for backups
-# resource "google_storage_bucket" "backup" {
-#   provider = google-beta.service-account
-#   project  = google_project.default.project_id
-#   name     = "${google_project.default.project_id}-backup"
-#   location = local.bucket_location
-# }
+# ====================================================== #
+#   Section 5: Enables the Authentication Service
+# ====================================================== #
+resource "google_identity_platform_config" "identity_platform_config" {
+  count                      = local.enable_authentication_service ? 1 : 0
+  project                    = google_project.default.project_id
+  autodelete_anonymous_users = true
+  sign_in {
+    allow_duplicate_emails = false
+    email {
+      enabled           = true
+      password_required = true
+    }
+  }
+  depends_on = [
+    module.firebase,
+  ]
+}
 
-# # Create admin-sdk service account
-# resource "google_service_account" "admin_sdk" {
-#   provider     = google-beta.gcloud-user
-#   project      = google_project.default.project_id
-#   account_id   = "firebase-adminsdk-ouwu6"
-#   display_name = "firebase-adminsdk"
-# }
-# resource "google_project_iam_member" "admin-sdk-token-creator" {
-#   provider = google-beta.gcloud-user
-#   project  = google_project.default.project_id
-#   role     = "roles/iam.serviceAccountTokenCreator"
-#   member   = "serviceAccount:${google_service_account.admin_sdk.email}"
-# }
-# resource "google_project_iam_member" "admin-sdk-agent" {
-#   provider = google-beta.gcloud-user
-#   project  = google_project.default.project_id
-#   role     = "roles/firebase.sdkAdminServiceAgent"
-#   member   = "serviceAccount:${google_service_account.admin_sdk.email}"
-# }
-# resource "google_service_account_key" "admin_sdk" {
-#   provider           = google-beta.gcloud-user
-#   service_account_id = google_service_account.service_account.id
-#   # Wait for the account being added to roles
-#   depends_on = [
-#     google_project_iam_member.admin-sdk-token-creator,
-#     google_project_iam_member.admin-sdk-agent,
-#   ]
-# }
+# ====================================================== #
+#   Section 6: Outputs secrets to local file for
+#              futher integrations
+# ====================================================== #
+resource "local_file" "firebase_config" {
+  content = jsonencode({
+    firebase = {
+      appId             = module.firebase.app.app_id
+      apiKey            = module.firebase.app_config.api_key
+      authDomain        = module.firebase.app_config.auth_domain
+      databaseURL       = lookup(module.firebase.app_config, "database_url", "")
+      storageBucket     = lookup(module.firebase.app_config, "storage_bucket", "")
+      messagingSenderId = lookup(module.firebase.app_config, "messaging_sender_id", "")
+      measurementId     = lookup(module.firebase.app_config, "measurement_id", "")
+    }
+  })
+  filename = "${path.module}/firebase-config.json"
+  depends_on = [
+    module.firebase
+  ]
+}
 
-# # Create firebase storage
-# resource "null_resource" "activate_storage" {
-#   triggers = {
-#     bucket = data.google_firebase_web_app_config.app.storage_bucket
-#   }
-#   provisioner "local-exec" {
-#     command     = "curl -X POST -H 'Authorization: Bearer ${nonsensitive(data.google_service_account_access_token.default.access_token)}' -H 'Content-Type: application/json' 'https://firebasestorage.googleapis.com/v1beta/projects/${google_project.default.project_id}/buckets/${data.google_firebase_web_app_config.app.storage_bucket}:addFirebase'"
-#     interpreter = ["sh", "-c"]
-#   }
-#   depends_on = [
-#     google_firebase_web_app.app,
-#     google_project_service.firebasestorage
-#   ]
-# }
+resource "local_file" "secrets_file" {
+  content = jsonencode({
+    private = {
+      serviceAccount = jsondecode(base64decode(module.firebase.admin_sdk_account_key.private_key))
+      firebase = {
+        backupBucket = module.firebase.app_backup_bucket.name
+      }
+    }
+    public = {
+      firebase = {
+        projectId         = google_project.default.project_id
+        appId             = module.firebase.app.app_id
+        apiKey            = module.firebase.app_config.api_key
+        authDomain        = module.firebase.app_config.auth_domain
+        databaseURL       = lookup(module.firebase.app_config, "database_url", "")
+        storageBucket     = lookup(module.firebase.app_config, "storage_bucket", "")
+        messagingSenderId = lookup(module.firebase.app_config, "messaging_sender_id", "")
+        measurementId     = lookup(module.firebase.app_config, "measurement_id", "")
+      }
+    }
+  })
+  filename = "${path.module}/secrets.json"
+  depends_on = [
+    module.firebase
+  ]
+}
 
-# # Enable authentication service
-# resource "google_identity_platform_config" "identity_platform_config" {
-#   provider                   = google-beta.service-account
-#   project                    = google_project.default.project_id
-#   autodelete_anonymous_users = true
-#   depends_on = [
-#     google_firebase_web_app.app,
-#     google_project_service.identitytoolkit
-#   ]
-# }
-# resource "google_identity_platform_project_default_config" "identity_project_config" {
-#   provider = google-beta.service-account
-#   project  = google_project.default.project_id
-
-#   sign_in {
-#     allow_duplicate_emails = false
-
-#     email {
-#       enabled           = true
-#       password_required = true
-#     }
-#   }
-
-#   depends_on = [google_identity_platform_config.identity_platform_config]
-# }
-
-# # Write secrets to local file
-# resource "local_file" "firebase_config" {
-#   content = jsonencode({
-#     firebase = {
-#       appId             = google_firebase_web_app.app.app_id
-#       apiKey            = data.google_firebase_web_app_config.app.api_key
-#       authDomain        = data.google_firebase_web_app_config.app.auth_domain
-#       databaseURL       = lookup(data.google_firebase_web_app_config.app, "database_url", "")
-#       storageBucket     = lookup(data.google_firebase_web_app_config.app, "storage_bucket", "")
-#       messagingSenderId = lookup(data.google_firebase_web_app_config.app, "messaging_sender_id", "")
-#       measurementId     = lookup(data.google_firebase_web_app_config.app, "measurement_id", "")
-#     }
-#   })
-#   filename = "${path.module}/firebase-config.json"
-#   depends_on = [
-#     google_firebase_web_app.app
-#   ]
-# }
-
-# resource "local_file" "secrets_file" {
-#   content = jsonencode({
-#     private = {
-#       serviceAccount = jsondecode(base64decode(google_service_account_key.admin_sdk.private_key))
-#       firebase = {
-#         backupBucket = google_storage_bucket.backup.name
-#       }
-#     }
-#     public = {
-#       firebase = {
-#         projectId         = google_project.default.project_id
-#         appId             = google_firebase_web_app.app.app_id
-#         apiKey            = data.google_firebase_web_app_config.app.api_key
-#         authDomain        = data.google_firebase_web_app_config.app.auth_domain
-#         databaseURL       = lookup(data.google_firebase_web_app_config.app, "database_url", "")
-#         storageBucket     = lookup(data.google_firebase_web_app_config.app, "storage_bucket", "")
-#         messagingSenderId = lookup(data.google_firebase_web_app_config.app, "messaging_sender_id", "")
-#         measurementId     = lookup(data.google_firebase_web_app_config.app, "measurement_id", "")
-#       }
-#     }
-#   })
-#   filename = "${path.module}/secrets.json"
-#   depends_on = [
-#     google_firebase_web_app.app
-#   ]
-# }
-
-# resource "local_file" "firebaserc" {
-#   content = jsonencode({
-#     projects = {
-#       development = google_project.default.project_id
-#       production  = google_project.default.project_id
-#     }
-#   })
-#   filename = "${path.module}/.firebaserc"
-#   depends_on = [
-#     google_project.default
-#   ]
-# }
+resource "local_file" "firebaserc" {
+  content = jsonencode({
+    projects = {
+      development = google_project.default.project_id
+      production  = google_project.default.project_id
+    }
+  })
+  filename = "${path.module}/.firebaserc"
+  depends_on = [
+    google_project.default
+  ]
+}
 
 
-# resource "local_file" "admin_config" {
-#   content  = base64decode(google_service_account_key.mykey.private_key)
-#   filename = "${path.module}/admin-config.json"
-#   depends_on = [
-#     google_service_account_key.mykey,
-#     google_firebase_web_app.app
-#   ]
-# }
+resource "local_file" "admin_config" {
+  content  = base64decode(google_service_account_key.sa_key.private_key)
+  filename = "${path.module}/admin-config.json"
+  depends_on = [
+    google_service_account_key.sa_key,
+    module.firebase
+  ]
+}
