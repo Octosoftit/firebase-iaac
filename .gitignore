@@ -32,3 +32,8 @@ override.tf.json
 # Ignore CLI configuration files
 .terraformrc
 terraform.rc
+
+.firebaserc
+admin-config.json
+firebase-config.json
+secrets.json
